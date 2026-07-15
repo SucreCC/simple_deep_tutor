@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, AsyncIterator
 
 from deeptutor.services.session.protocol import SessionStoreProtocol
 
@@ -8,6 +8,7 @@ from deeptutor.services.session.protocol import SessionStoreProtocol
 @dataclass
 class _LiveSubscriber:
     queue: asyncio.Queue[dict[str, Any]]
+
 
 @dataclass
 class _TurnExecution:
@@ -21,8 +22,9 @@ class _TurnExecution:
     next_seq: int = 1
     events_flushed: bool = False
 
+
 class TurnRuntimeManager:
-    def __init__(self, store:SessionStoreProtocol|None =None) -> None:
+    def __init__(self, store: SessionStoreProtocol | None = None) -> None:
         from deeptutor.services.session import get_session_store
         self.store = store or get_session_store()
         self._lock = asyncio.Lock()
@@ -39,7 +41,15 @@ class TurnRuntimeManager:
         # frontend sends the v2 ``ask_user`` shape.
         self._reply_queues: dict[str, asyncio.Queue[dict[str, Any] | None]] = {}
 
-
+    async def subscribe_turn(
+            self,
+            turn_id: str,
+            after_seq: int = 0
+    )-> AsyncIterator[dict[str, Any]]:
+        backlog = await self.store.get_turn_events(turn_id,after_seq=after_seq)
+        last_seq = after_seq
+        done_yielded =False
+        return None
 
 
 

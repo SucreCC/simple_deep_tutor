@@ -35,4 +35,12 @@ async def unified_websocket(ws: WebSocket) -> None:
             pass
 
     async def subscribe_turn(turn_id: str, after_seq: int = 0) -> None:
-       from deeptutor.services.session import get_turn_runtime_manager
+        from deeptutor.services.session import get_turn_runtime_manager
+
+        async def _forward() -> None:
+            runtime = get_turn_runtime_manager()
+            async for event in runtime.subscribe_turn(turn_id, after_seq=after_seq):
+                await safe_send(event)
+
+            await stop_subscription(turn_id)
+            subscription_tasks[turn_id] = asyncio.create_task(_forward())
