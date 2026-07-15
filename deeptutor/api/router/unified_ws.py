@@ -9,10 +9,8 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-
 @router.websocket("/ws")
 async def unified_websocket(ws: WebSocket) -> None:
-
     await ws.accept()
     closed = False
     subscription_tasks: dict[str, asyncio.Task[None]] = {}
@@ -22,11 +20,11 @@ async def unified_websocket(ws: WebSocket) -> None:
         if closed:
             return
         try:
-            await ws.send_text(json.dumps(data,ensure_ascii=False,default=str))
+            await ws.send_text(json.dumps(data, ensure_ascii=False, default=str))
         except Exception:
             closed = True
 
-    async def stop_subscription(key:str) -> None:
+    async def stop_subscription(key: str) -> None:
         task = subscription_tasks.pop(key, None)
         if task is None:
             return
@@ -36,3 +34,5 @@ async def unified_websocket(ws: WebSocket) -> None:
         except asyncio.CancelledError:
             pass
 
+    async def subscribe_turn(turn_id: str, after_seq: int = 0) -> None:
+       pass
