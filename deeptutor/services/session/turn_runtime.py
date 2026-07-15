@@ -38,3 +38,29 @@ class TurnRuntimeManager:
         # ``answers`` carries the structured per-question replies when the
         # frontend sends the v2 ``ask_user`` shape.
         self._reply_queues: dict[str, asyncio.Queue[dict[str, Any] | None]] = {}
+
+
+
+
+
+
+
+
+import threading
+
+_runtime_lock = threading.Lock()
+_runtime_instances: dict[str, TurnRuntimeManager] = {}
+
+
+def get_turn_runtime_manager() -> TurnRuntimeManager:
+    from deeptutor.services.session import get_session_store
+
+    store = get_session_store()
+    key = str(getattr(store, "db_path", id(store)))
+    with _runtime_lock:
+        if key not in _runtime_instances:
+            _runtime_instances[key] = TurnRuntimeManager(store=store)
+        return _runtime_instances[key]
+
+
+__all__ = ["TurnRuntimeManager", "get_turn_runtime_manager"]
