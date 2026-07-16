@@ -1,7 +1,9 @@
 import asyncio
+import contextlib
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
+from deeptutor.core.stream import StreamEvent, StreamEventType
 from deeptutor.services.session.protocol import SessionStoreProtocol
 
 
@@ -216,6 +218,37 @@ class TurnRuntimeManager:
         """Clear stale active turns before creating a fresh turn."""
         for turn in await self.store.list_active_turns(session_id):
             await self._fail_orphan_running_turn(turn)
+
+    async def _publish_live_event(
+            self,
+            execution: _TurnExecution,
+            event: StreamEvent,
+    ) -> dict[str, Any]:
+        if event.type == StreamEventType.DONE and not event.metadata.get("status"):
+            event.metadata = {**event.metadata, "status": "completed"}
+        event.session_id = execution.session_id
+        event.turn_id = execution.turn_id
+        payload = event.to_dict()
+        async with self._lock:
+            current = self._executions.get(execution.turn_id, execution)
+            seq = int(payload.get("seq") or 0)
+            if seq <= 0:
+                seq = current.next_seq
+                current.next_seq += 1
+                if current is not execution:
+                    execution.next_seq = max(execution.next_seq, current.next_seq)
+            else:
+                current.next_seq = max(current.next_seq, seq + 1)
+                execution.next_seq = max(execution.next_seq, seq + 1)
+            payload["seq"] = seq
+            current.events.append(payload)
+            if current is not execution:
+                execution.events.append(payload)
+            subscribers = list(current.subscribers)
+        for subscriber in subscribers:
+            with contextlib.suppress(asyncio.QueueFull):
+                subscriber.queue.put_nowait(payload)
+        return payload
 
     async def start_turn(self, payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         capability = str(payload.get("capability") or "chat")
