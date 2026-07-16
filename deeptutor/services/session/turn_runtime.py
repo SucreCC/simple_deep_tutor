@@ -151,7 +151,175 @@ class TurnRuntimeManager:
                 if final_turn is None or final_status in {"failed", "cancelled", "completed"}:
                     yield self._synthesize_done_event(turn_id, final_turn)
 
+    async def start_turn(self, payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        capability = str(payload.get("capability") or "chat")
+        raw_config = dict(payload.get("config", {}) or {})
+        runtime_only_keys = (
+            "_persist_user_message",
+            "_regenerate",
+            "_regenerated_from_message_id",
+            "_superseded_turn_id",
+            "followup_question_context",
+            # Per-turn subagent consult budget (composer stepper). Not part of
+            # any capability's public config schema, so it rides as a runtime
+            # key — stripped before validation, merged back into the turn config
+            # and read by the subagent capability from context.config_overrides.
+            "subagent_consult_budget",
+        )
+        runtime_only_config = {
+            key: raw_config.pop(key) for key in runtime_only_keys if key in raw_config
+        }
+        try:
+            from deeptutor.runtime.request_contracts import validate_capability_config
 
+            validated_public_config = validate_capability_config(capability, raw_config)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+        payload = {
+            **payload,
+            "capability": capability,
+            "config": {**validated_public_config, **runtime_only_config},
+        }
+        session = await self.store.ensure_session(payload.get("session_id"))
+        preferences = session.get("preferences") or {}
+        # Persona is a session-level preference (mirrors llm_selection): an
+        # explicit ``persona`` key in the payload — including an empty string,
+        # which means "Default" / no persona — wins and is persisted below; an
+        # absent key falls back to the session's stored preference so the
+        # active persona survives reloads and follows the session.
+        persona_explicit = "persona" in payload
+        persona_pref = str(
+            (payload.get("persona") if persona_explicit else preferences.get("persona")) or ""
+        ).strip()
+        payload = {**payload, "persona": persona_pref}
+        raw_llm_selection = payload.get("llm_selection")
+        if raw_llm_selection is None:
+            raw_llm_selection = preferences.get("llm_selection")
+        try:
+            llm_selection = _llm_selection_dict(raw_llm_selection)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+        if llm_selection:
+            try:
+                from deeptutor.multi_user.model_access import apply_allowed_llm_selection
+
+                llm_selection = apply_allowed_llm_selection(llm_selection) or {}
+            except PermissionError as exc:
+                raise RuntimeError(str(exc)) from exc
+        else:
+            # Non-admin users MUST end up with a concrete llm_selection so we
+            # never silently fall through to the global LLM client (which is
+            # configured from admin runtime settings). Admin keeps the existing behavior
+            # (None llm_selection → default config from admin scope).
+            from deeptutor.multi_user.context import get_current_user
+            from deeptutor.multi_user.model_access import (
+                has_capability_access,
+                redacted_model_access,
+            )
+
+            current_user = get_current_user()
+            if not current_user.is_admin:
+                # Single gate, shared with the frontend lock and any HTTP
+                # surface: no usable LLM grant → a clear terminal error here
+                # instead of a silent fall-through to the global client.
+                if not has_capability_access("llm"):
+                    raise RuntimeError(
+                        "No LLM model is assigned to your account. Please contact an administrator."
+                    )
+                # Pin the first granted-and-available model as the selection.
+                assigned_llms = [
+                    item
+                    for item in redacted_model_access(current_user.id).get("llm", [])
+                    if item.get("available")
+                ]
+                llm_selection = {
+                    "profile_id": assigned_llms[0].get("profile_id"),
+                    "model_id": assigned_llms[0].get("model_id"),
+                }
+        if llm_selection:
+            from deeptutor.services.config import get_model_catalog_service
+            from deeptutor.services.model_selection import (
+                LLMSelection,
+                apply_llm_selection_to_catalog,
+            )
+
+            try:
+                apply_llm_selection_to_catalog(
+                    get_model_catalog_service().load(),
+                    LLMSelection.from_payload(llm_selection),
+                )
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
+        # If the caller didn't pin a per-turn tool list (e.g. non-web
+        # channels or the new web UI which sources tools from
+        # /settings/tools), back-fill from the user's saved toggleable-tool
+        # preference so the chat pipeline sees the same set the user picked
+        # in Settings. Callers that explicitly pass ``tools`` (including
+        # an empty list) keep their value untouched.
+        if payload.get("tools") is None:
+            try:
+                from deeptutor.api.routers.settings import get_enabled_optional_tools
+
+                payload = {**payload, "tools": list(get_enabled_optional_tools())}
+            except Exception:
+                payload = {**payload, "tools": []}
+        # Admin-imposed per-user tool whitelist (grant v2). Sits after the
+        # back-fill so explicit caller lists and settings defaults pass the
+        # same gate; this is the single enforcement point for every
+        # capability's turn.
+        from deeptutor.multi_user.tool_access import allowed_optional_tools
+
+        allowed_tools = allowed_optional_tools()
+        if allowed_tools is not None:
+            payload = {
+                **payload,
+                "tools": [t for t in (payload.get("tools") or []) if t in allowed_tools],
+            }
+        payload = {**payload, "llm_selection": llm_selection}
+        await self._recover_orphan_running_turns_for_session(session["id"])
+        preference_update: dict[str, Any] = {
+            "capability": capability,
+            "tools": list(payload.get("tools") or []),
+            "knowledge_bases": list(payload.get("knowledge_bases") or []),
+            "language": str(payload.get("language") or "en"),
+        }
+        if llm_selection:
+            preference_update["llm_selection"] = llm_selection
+        if persona_explicit:
+            # Persist explicit set AND explicit clear ("" = back to Default).
+            preference_update["persona"] = persona_pref
+        await self.store.update_session_preferences(session["id"], preference_update)
+        turn = await self.store.create_turn(session["id"], capability=capability)
+        execution = _TurnExecution(
+            turn_id=turn["id"],
+            session_id=session["id"],
+            capability=capability,
+            payload=dict(payload),
+        )
+        session_metadata: dict[str, Any] = {
+            "session_id": session["id"],
+            "turn_id": turn["id"],
+        }
+        regenerated_from = runtime_only_config.get("_regenerated_from_message_id")
+        if regenerated_from is not None:
+            session_metadata["regenerated_from_message_id"] = regenerated_from
+        superseded_turn_id = runtime_only_config.get("_superseded_turn_id")
+        if superseded_turn_id:
+            session_metadata["superseded_turn_id"] = str(superseded_turn_id)
+        if runtime_only_config.get("_regenerate"):
+            session_metadata["regenerate"] = True
+        await self._publish_live_event(
+            execution,
+            StreamEvent(
+                type=StreamEventType.SESSION,
+                source="turn_runtime",
+                metadata=session_metadata,
+            ),
+        )
+        async with self._lock:
+            self._executions[turn["id"]] = execution
+            execution.task = asyncio.create_task(self._run_turn(execution))
+        return session, turn
 
 
 
