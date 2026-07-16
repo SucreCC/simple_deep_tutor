@@ -5,6 +5,15 @@ from typing import Any, AsyncIterator
 from deeptutor.services.session.protocol import SessionStoreProtocol
 
 
+def _llm_selection_dict(value: Any) -> dict[str, str] | None:
+    from deeptutor.services.model_selection import LLMSelection
+
+    selection = LLMSelection.from_payload(value)
+    return selection.to_dict() if selection else None
+
+
+
+
 @dataclass
 class _LiveSubscriber:
     queue: asyncio.Queue[dict[str, Any]]
