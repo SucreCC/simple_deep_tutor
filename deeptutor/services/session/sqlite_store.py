@@ -857,7 +857,7 @@ class SQLiteSessionStore:
         current_prefs_json: str | None,
         incoming_prefs: dict[str, Any],
     ) -> bool:
-        """Merge agent attribution from a re-import into an existing session's
+        """Merge agents attribution from a re-import into an existing session's
         ``preferences.import`` block, leaving everything else untouched. Returns
         whether anything changed (so the caller can skip a needless write)."""
         incoming_import = (incoming_prefs or {}).get("import") or {}
@@ -901,9 +901,9 @@ class SQLiteSessionStore:
                 # Idempotent on content: a session imported before keeps its
                 # (possibly already-continued) state — re-importing the same
                 # folder never duplicates rows or clobbers the user's edits.
-                # We do, however, backfill agent attribution (agent_id /
+                # We do, however, backfill agents attribution (agent_id /
                 # agent_name) so re-syncing re-tags conversations that were
-                # imported before the agent model existed, and an agent rename
+                # imported before the agents model existed, and an agents rename
                 # propagates. This only touches the ``import`` metadata block.
                 updated = self._backfill_import_meta_sync(
                     conn, session_id, existing["preferences_json"], preferences
