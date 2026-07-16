@@ -5,6 +5,31 @@ from typing import Any, AsyncIterator
 from deeptutor.services.session.protocol import SessionStoreProtocol
 
 
+
+
+_TITLE_QUOTE_PAIRS: tuple[tuple[str, str], ...] = (
+    ('"', '"'),
+    ("'", "'"),
+    ("“", "”"),
+    ("‘", "’"),
+    ("「", "」"),
+    ("『", "』"),
+    ("`", "`"),
+)
+_TITLE_PREFIXES: tuple[str, ...] = (
+    "Title:",
+    "title:",
+    "TITLE:",
+    "Title-",
+    "标题：",
+    "标题:",
+    "对话标题：",
+    "对话标题:",
+)
+_TITLE_TRAILING_PUNCT = ".。!！?？,，;；、 \t"
+_INTERRUPTED_TURN_ERROR = "Turn interrupted by server restart. Please retry your message."
+
+
 def _llm_selection_dict(value: Any) -> dict[str, str] | None:
     from deeptutor.services.model_selection import LLMSelection
 
@@ -159,6 +184,38 @@ class TurnRuntimeManager:
                 final_status = str((final_turn or {}).get("status") or "").strip()
                 if final_turn is None or final_status in {"failed", "cancelled", "completed"}:
                     yield self._synthesize_done_event(turn_id, final_turn)
+
+    async def _has_live_execution(self, turn_id: str) -> bool:
+        """Whether this process still owns the turn's in-memory runner."""
+        async with self._lock:
+            execution = self._executions.get(turn_id)
+            if execution is None:
+                return False
+            # Some tests and pause/resubscribe paths create an execution
+            # placeholder without a task. Treat its presence as live so we do
+            # not falsely fail a turn that is still owned by this process.
+            return execution.task is None or not execution.task.done()
+
+    async def _fail_orphan_running_turn(self, turn: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Finalize a persisted running turn that has no local execution.
+
+        Running turns are process-local: after a server/container restart the
+        database row may still say ``running`` while the task and subscriber
+        queues are gone. The runtime owns that liveness check, not the store,
+        so recovery stays backend-agnostic.
+        """
+        if turn is None or str(turn.get("status") or "") != "running":
+            return turn
+        turn_id = str(turn.get("id") or turn.get("turn_id") or "").strip()
+        if not turn_id or await self._has_live_execution(turn_id):
+            return turn
+        await self.store.update_turn_status(turn_id, "failed", _INTERRUPTED_TURN_ERROR)
+        return await self.store.get_turn(turn_id)
+
+    async def _recover_orphan_running_turns_for_session(self, session_id: str) -> None:
+        """Clear stale active turns before creating a fresh turn."""
+        for turn in await self.store.list_active_turns(session_id):
+            await self._fail_orphan_running_turn(turn)
 
     async def start_turn(self, payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         capability = str(payload.get("capability") or "chat")
