@@ -21,7 +21,7 @@ def empty_grant(user_id: str) -> dict[str, Any]:
         "knowledge_bases": [],
         "skills": [],
         # Partners an admin has assigned to this user. Partners stay
-        # admin-managed (the /api/v1/partners CRUD routers is admin-gated); a
+        # admin-managed (the /api/v1/partners CRUD router is admin-gated); a
         # grant only lets the user *see and consult* the named partners — same
         # shape as ``skills`` (``[{"partner_id": ...}]``).
         "partners": [],

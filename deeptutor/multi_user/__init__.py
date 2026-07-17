@@ -18,6 +18,6 @@ the ``sessions`` / ``messages`` / ``turns`` collections are not filtered by
 the schema and queries are updated.
 """
 
-# from .models import CurrentUser, UserRecord, UserScope
-#
-# __all__ = ["CurrentUser", "UserRecord", "UserScope"]
+from .models import CurrentUser, UserRecord, UserScope
+
+__all__ = ["CurrentUser", "UserRecord", "UserScope"]
